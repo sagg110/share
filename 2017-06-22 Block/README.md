@@ -2,7 +2,7 @@
 
 Block 编译后，有两个最为重要的部分，impl 结构体 与 desc 结构体指针。我们从最为简单基础的开始：
 
-```cpp
+```objective-c
 int main(int argc, const char * argv[]) {
     @autoreleasepool {
         // insert code here...
@@ -19,7 +19,7 @@ int main(int argc, const char * argv[]) {
 }
 ```
 
-使用 `clang -rewrite-objc xxx.m ` 命令，编译后（已删除一些影响阅读的字符，用 xxx 代替）：
+使用 `clang -rewrite-objc xxx.m ` 命令，编译后（已删除一些影响阅读的字符，用 xxx 代替）：
 
 ```cpp
 // block 结构体
@@ -36,6 +36,13 @@ struct __main_block_impl_0 {
   }
 };
 
+// block 的实现
+struct __block_impl {
+  void *isa; // isa 指针，指向父类的实例。void * 相当于 id 是个实例。
+  int Flags; // 
+  int Reserved;
+  void *FuncPtr; //函数指针 指向block代码块的实现函数
+};
 
 // block 的描述
 static struct __main_block_desc_0 {
@@ -469,93 +476,3 @@ static void __Test__init_block_func_0(struct __Test__init_block_impl_0 *__cself)
 之前有人问到这个问题，说如果 block 中调用的方法又用到了 self，会造成循环引用吗？想想如果会造成，那岂不是很可怕，好像一直这样写，都没什么问题。那这是为什么呢？
 
 别忘了 OC 是消息机制，发送完消息之后就不管了，所以，并不影响消息的实现。
-
-## 疑问
-
-虽然能将 block 编译出来看到代码，但是还是有很多疑问的，希望大家能解答一下。
-
-### ARC 与 MRC 下，有无 `__block` 标识，对 block 持有对象的影响
-
-其实这里是四种状态：
-
-1. ARC + 无 `__block`
-2. MRC + 无 `__block`
-3. ARC + 有 `__block`
-4. MRC + 有 `__block`
-
-首先来看问题 1、2：
-
-```objective-c
-- (instancetype)init {
-    self = [super init];
-    if (self) {
-        
-        // 定义一个可变数组 arr
-        NSMutableArray *arr = [NSMutableArray new];
-        // 输出 retainCount
-        NSLog(@"1. %ld", CFGetRetainCount((__bridge CFTypeRef)(arr))); // ARC: 1; MRC: 1
-        // 为减少隐式的 __strong 造成拷贝到堆的影响，所以使用 __unsafe_unretained 修饰
-        __unsafe_unretained dispatch_block_t block = ^{
-            NSLog(@"%@", arr);
-            // 输出调用 block 时，arr 的 retainCount
-            NSLog(@"2. %ld", CFGetRetainCount((__bridge CFTypeRef)(arr))); // ARC: 1; MRC: 1
-        };
-      	// 在定义完 block 后，arr 的 retainCount
-        NSLog(@"3. %ld", CFGetRetainCount((__bridge CFTypeRef)(arr))); // ARC: 2; MRC: 1
-        // 显示拷贝到堆
-        self.block = block;
-        // 在 block 拷贝到堆以后，arr 的 retainCount
-        NSLog(@"4. %ld", CFGetRetainCount((__bridge CFTypeRef)(arr))); // ARC: 3; MRC: 2
-      
-        // 如果是 MRC，则手动 release
-      	[arr release];
-    }
-    return self;
-}
-
-// 调用 block
-- (void)run {
-    self.block();
-}
-```
-
-可以看到，同样没有使用 `__block` 修饰，ARC 在 block 定义完以后，`arr` 的 retainCount 要比 MRC 下多 1，这是因为在 block 的结构体中，所定义的 `NSMutableArray *arr`，默认的缺省值是 `__strong`，而导致的持有，而 MRC 下，缺省值不是 `__strong` 造成的。
-
-再来看问题 2、4，还是借助上面的例子，只是在 `arr` 定义时，在前面使用 `__block` 进行修饰，但这一次的 retainCount 却大为不同：
-
-```objective-c
-- (instancetype)init {
-    self = [super init];
-    if (self) {
-        
-        __block NSMutableArray *arr = [NSMutableArray new];
-        NSLog(@"1. %ld", CFGetRetainCount((__bridge CFTypeRef)(arr))); // ARC: 1; MRC: 1
-        __unsafe_unretained dispatch_block_t block = ^{
-            NSLog(@"%@", arr);
-            NSLog(@"2. %ld", CFGetRetainCount((__bridge CFTypeRef)(arr))); // ARC: 1; MRC: 1
-        };
-        NSLog(@"3. %ld", CFGetRetainCount((__bridge CFTypeRef)(arr))); // ARC: 1; MRC: 1
-        self.block = block;
-        NSLog(@"4. %ld", CFGetRetainCount((__bridge CFTypeRef)(arr))); // ARC: 1; MRC: 1
-        
-        [arr release];
-    }
-    return self;
-}
-
-- (void)run {
-    self.block();
-}
-```
-
-这一次，我们发现，无论是 ARC，还是 MRC，`arr` 的 retainCount 始终为 1，在查阅资料后，找到这样一句话：
-
-> 在 MRC 下，`__block` 说明符可被用来避免循环引用，是因为当 block 从栈复制到堆上时，如果变量被 `__block` 修饰，则不会再次 retain，如果没有被 `__block` 修饰，则会被 retain。
-
-但是，从上面的代码输出来看，ARC 和 MRC，block 是否拷贝到堆上，都没有再次对变量进行持有，retainCount 始终为 1，所以，到这里我遇到几个不太理解的地方：
-
-1. `__block` 修饰符不再持有对象，仅仅是在 MRC 下有效，还是 ARC 与 MRC 下效果是相同的？
-2. 如果效果是相同的，为什么 `__block` 不能解决 ARC 下的循环引用问题？
-3. 不能解决 ARC 下的循环引用问题，是否是因为 ARC 下，`arr` 定义时，缺省值是 `__strong` 导致的？
-4. 在 ARC 下，变量出作用域，编译器插入 release，为什么 `arr` 的 retainCount 是 1，经过一次 release 以后，并未出现问题，而在 MRC 下，在 block 调用的时候，就会出现 crash？
-
